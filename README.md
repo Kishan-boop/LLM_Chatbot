@@ -113,4 +113,4 @@ SQLite keeps the demo lightweight and easy to run. For production, this schema m
 
 ## Demo
 
-Run `docker compose up --build`, open http://localhost:5173, send a few messages, and watch the sidebar update conversations and metrics in near real time.
+Run `docker compose up --build`, open http://localhost:5174, send a few messages, and watch the sidebar update conversations and metrics in near real time.
