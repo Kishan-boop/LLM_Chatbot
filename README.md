@@ -26,7 +26,7 @@ docker compose up --build
 
 Open:
 
-- Frontend: http://localhost:5173
+- Frontend: http://localhost:5174
 - Chatbot API docs: http://localhost:8000/docs
 - Ingestion API docs: http://localhost:8001/docs
 
