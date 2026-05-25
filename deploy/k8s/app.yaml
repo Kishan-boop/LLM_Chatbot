@@ -1,0 +1,382 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm-logger
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: llm-logger-secrets
+  namespace: llm-logger
+type: Opaque
+stringData:
+  OPENAI_API_KEY: "replace-with-openrouter-or-openai-key"
+  GROQ_API_KEY: ""
+  SECRET_KEY: "replace-with-32-plus-character-random-secret"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-logger-config
+  namespace: llm-logger
+data:
+  LLM_PROVIDER: "openai"
+  LLM_FALLBACK_PROVIDERS: "groq,mock"
+  DEFAULT_MODEL: "openrouter/free"
+  OPENAI_BASE_URL: "https://openrouter.ai/api/v1"
+  INFERENCE_LOG_STREAM: "inference.logs"
+  REDIS_URL: "redis://redis:6379/0"
+  ALLOWED_ORIGINS: "http://localhost:30173"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ingestion-data
+  namespace: llm-logger
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chatbot-data
+  namespace: llm-logger
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: llm-logger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: llm-logger
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion
+  namespace: llm-logger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingestion
+  template:
+    metadata:
+      labels:
+        app: ingestion
+    spec:
+      containers:
+        - name: ingestion
+          image: llm-logger-ingestion:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+          env:
+            - name: DATABASE_PATH
+              value: /data/ingestion.db
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: "8001"
+            - name: RATE_LIMIT_PER_MINUTE
+              value: "1000"
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: REDIS_URL
+            - name: INFERENCE_LOG_STREAM
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: INFERENCE_LOG_STREAM
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ingestion-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion
+  namespace: llm-logger
+spec:
+  selector:
+    app: ingestion
+  ports:
+    - port: 8001
+      targetPort: 8001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatbot
+  namespace: llm-logger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chatbot
+  template:
+    metadata:
+      labels:
+        app: chatbot
+    spec:
+      containers:
+        - name: chatbot
+          image: llm-logger-chatbot:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_PATH
+              value: /data/chatbot.db
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: "8000"
+            - name: LLM_PROVIDER
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: LLM_PROVIDER
+            - name: LLM_FALLBACK_PROVIDERS
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: LLM_FALLBACK_PROVIDERS
+            - name: DEFAULT_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: DEFAULT_MODEL
+            - name: OPENAI_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: OPENAI_BASE_URL
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-logger-secrets
+                  key: OPENAI_API_KEY
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-logger-secrets
+                  key: GROQ_API_KEY
+                  optional: true
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: llm-logger-secrets
+                  key: SECRET_KEY
+            - name: INGESTION_API_URL
+              value: http://ingestion:8001/api/ingest
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: REDIS_URL
+            - name: INFERENCE_LOG_STREAM
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: INFERENCE_LOG_STREAM
+            - name: ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-logger-config
+                  key: ALLOWED_ORIGINS
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 750m
+              memory: 768Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: chatbot-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatbot
+  namespace: llm-logger
+spec:
+  selector:
+    app: chatbot
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: llm-logger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: llm-logger-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5173
+          env:
+            - name: CHATBOT_API_URL
+              value: http://chatbot:8000
+            - name: INGESTION_API_URL
+              value: http://ingestion:8001
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5173
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5173
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: llm-logger
+spec:
+  type: NodePort
+  selector:
+    app: frontend
+  ports:
+    - port: 5173
+      targetPort: 5173
+      nodePort: 30173
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-logger
+  namespace: llm-logger
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: llm-logger.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 5173
