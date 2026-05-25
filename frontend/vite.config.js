@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-const frontendPort = Number(process.env.FRONTEND_PORT || 5173);
+const frontendPort = Number(process.env.FRONTEND_PORT || 5174);
 
 export default defineConfig({
   plugins: [react()],
